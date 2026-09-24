@@ -5,8 +5,10 @@ from Kadaster transactions, and turn it into a bid ladder (win chance, maandlast
 eigen geld per bid). Personal, non-commercial use only; see the technical spec for
 the Funda-terms constraints.
 
-This repository currently implements **M1 — Kadaster baseline**: what houses in the
-search area actually sell for, without Funda.
+Implemented so far:
+
+- **M1 — Kadaster baseline**: what houses in the search area actually sell for, without Funda.
+- **M2 — Funda watchlist**: daily snapshots of the listings you choose, with a stop marker.
 
 ## Layout
 
@@ -18,6 +20,10 @@ search area actually sell for, without Funda.
 | `src/bidadvisor/model/hedonic.py` | Ridge baseline / LightGBM challenger with split-conformal q05…q95 |
 | `src/bidadvisor/model/comparables.py` | k-nearest comparables, also the taxatie proxy |
 | `src/bidadvisor/model/backtest.py` | Rolling monthly backtest against the M1 targets |
+| `src/bidadvisor/listings/source.py` | `ListingSource` boundary; the only module that imports pyfunda |
+| `src/bidadvisor/listings/watchlist.py` | `serving/watchlist.json`, at most 50 active listings |
+| `src/bidadvisor/listings/nightly.py` | Nightly Funda step: paced fetches, stop marker, persistence |
+| `src/bidadvisor/transform/listings.py` | Silver `listing` and SCD2 `listing_version` |
 | `src/bidadvisor/storage/lake.py` | bronze / silver / gold / serving on a local folder |
 
 ## Running M1
@@ -37,6 +43,26 @@ uv run bidadvisor backtest --index data/reference/cbs_index.csv --region <region
 
 The price index CSV has columns `region, month (YYYY-MM), value` and optionally
 `published_on`; without it a month counts as published 22 days after it ends.
+
+## Running M2 (Funda watchlist)
+
+pyfunda is an optional extra (`uv sync --extra funda`); M1 runs without it.
+
+```bash
+uv run bidadvisor watch-add "https://www.funda.nl/detail/koop/<city>/<slug>/<id>/"
+uv run bidadvisor watch-list
+uv run bidadvisor funda-run            # nightly: one detail call per listing, 10 s apart
+uv run bidadvisor funda-run --simulate-error --no-bag   # prove the stop path, no Funda call
+uv run bidadvisor funda-resume         # show and remove the stop marker
+```
+
+Guardrails, as in the spec's risk table:
+
+- Only watchlisted listings are fetched: no search, similar-listings or price-history calls.
+- At most 50 active listings, one `listing()` call each per run, 10 seconds apart.
+- pyfunda runs with `max_retries=0`, so it neither retries nor rotates TLS fingerprints.
+- Any error writes `bronze/funda/STOP.json`, alerts and exits 1. Later runs skip Funda until
+  the marker is removed. A clean 404 (listing taken offline) is reported, not a stop.
 
 ## Checks
 

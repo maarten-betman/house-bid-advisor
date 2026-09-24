@@ -1,4 +1,4 @@
-"""M1 pipeline commands: Kadaster PDFs → BAG match → transactions → rolling backtest."""
+"""Pipeline commands: Kadaster baseline (M1) and the Funda watchlist (M2)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ import pandas as pd
 
 from bidadvisor.bag.match import match_addresses, match_rate, pdok_lookup
 from bidadvisor.kadaster.parse import filter_scope, parse_pdf
+from bidadvisor.listings.nightly import STOP_MARKER, run_funda_step, stop_marker
+from bidadvisor.listings.watchlist import Watchlist
 from bidadvisor.model.backtest import rolling_backtest, summarise
 from bidadvisor.storage.lake import Lake
 from bidadvisor.transform.transactions import build_transactions
@@ -87,6 +89,64 @@ def backtest(args: argparse.Namespace) -> int:
     return 0 if summary.passed else 1
 
 
+def watch_add(args: argparse.Namespace) -> int:
+    watchlist = Watchlist(Lake(args.lake))
+    entry = watchlist.add(args.url)
+    watchlist.save()
+    print(f"Watching {entry.funda_id}; fetched on the next nightly run")
+    return 0
+
+
+def watch_remove(args: argparse.Namespace) -> int:
+    watchlist = Watchlist(Lake(args.lake))
+    removed = watchlist.remove(args.funda_id)
+    watchlist.save()
+    print("Removed" if removed else f"{args.funda_id} is not on the watchlist")
+    return 0 if removed else 1
+
+
+def watch_list(args: argparse.Namespace) -> int:
+    for entry in Watchlist(Lake(args.lake)).active():
+        print(f"{entry.funda_id}  added {entry.added_at}  {entry.url}")
+    return 0
+
+
+class _SimulatedFailure:
+    """Stands in for Funda to prove the stop path without making a request."""
+
+    version = "simulated"
+
+    def fetch(self, funda_id: str):
+        raise RuntimeError(f"simulated failure for {funda_id}")
+
+    def close(self) -> None:
+        pass
+
+
+def funda_run(args: argparse.Namespace) -> int:
+    if args.simulate_error:
+        open_source = _SimulatedFailure
+    else:
+        from bidadvisor.listings.source import PyFundaSource
+
+        open_source = PyFundaSource
+    lookup = None if args.no_bag else pdok_lookup()
+    result = run_funda_step(Lake(args.lake), open_source, lookup=lookup)
+    print(result)
+    return result.exit_code
+
+
+def funda_resume(args: argparse.Namespace) -> int:
+    lake = Lake(args.lake)
+    marker = stop_marker(lake)
+    if marker is None:
+        print("No stop marker; Funda is enabled")
+        return 0
+    print(f"Clearing stop marker: {marker}")
+    lake.delete("bronze", STOP_MARKER)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bidadvisor")
     parser.add_argument("--lake", default="data", help="Local lake root (default: ./data)")
@@ -109,6 +169,26 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--months", type=int, default=24)
     bt.add_argument("--model", choices=["ridge", "lightgbm"], default="ridge")
     bt.set_defaults(run=backtest)
+
+    add = commands.add_parser("watch-add", help="Add a Funda listing link to the watchlist")
+    add.add_argument("url")
+    add.set_defaults(run=watch_add)
+
+    remove = commands.add_parser("watch-remove", help="Stop tracking a listing")
+    remove.add_argument("funda_id")
+    remove.set_defaults(run=watch_remove)
+
+    commands.add_parser("watch-list", help="Show active watchlist").set_defaults(run=watch_list)
+
+    run = commands.add_parser("funda-run", help="Nightly Funda step for the watchlist")
+    run.add_argument("--no-bag", action="store_true", help="Skip PDOK BAG matching")
+    run.add_argument(
+        "--simulate-error", action="store_true", help="Trip the stop marker without calling Funda"
+    )
+    run.set_defaults(run=funda_run)
+
+    resume = commands.add_parser("funda-resume", help="Show and remove the Funda stop marker")
+    resume.set_defaults(run=funda_resume)
 
     args = parser.parse_args(argv)
     return args.run(args)

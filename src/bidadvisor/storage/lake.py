@@ -37,3 +37,19 @@ class Lake:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(payload, indent=2, default=str))
         return target
+
+    def read_json(self, layer: str, name: str) -> dict:
+        return json.loads(self.path(layer, name).read_text())
+
+    def exists(self, layer: str, name: str) -> bool:
+        return self.path(layer, name).exists()
+
+    def delete(self, layer: str, name: str) -> None:
+        self.path(layer, name).unlink(missing_ok=True)
+
+    def read_tables(self, layer: str, folder: str) -> pd.DataFrame:
+        """Concatenate every Parquet file under ``layer/folder`` (append-only partitions)."""
+        files = sorted(self.path(layer, folder).glob("*.parquet"))
+        if not files:
+            raise FileNotFoundError(self.path(layer, folder))
+        return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
