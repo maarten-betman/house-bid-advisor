@@ -1,0 +1,34 @@
+# Lives at /srv/bidadvisor/compose.yaml on the Droplet; copied there by the Deploy workflow.
+name: bidadvisor
+
+x-app: &app
+  image: ghcr.io/maarten-betman/house-bid-advisor:latest
+  env_file: .env
+  volumes:
+    - /srv/bidadvisor/data:/data
+
+services:
+  job:
+    <<: *app
+    profiles: ["job"] # only started by `docker compose run`, never by `up`
+
+  api:
+    <<: *app
+    command: ["serve"]
+    restart: unless-stopped
+    expose: ["8000"]
+
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    env_file: .env
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api]
+
+volumes:
+  caddy_data:
+  caddy_config:

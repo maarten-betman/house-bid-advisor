@@ -1,0 +1,40 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - unattended-upgrades
+
+users:
+  - default
+  - name: deploy
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${deploy_public_key}
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/10-hardening.conf
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+  - path: /etc/systemd/system/bidadvisor-nightly.service
+    content: |
+      ${indent(6, nightly_service)}
+  - path: /etc/systemd/system/bidadvisor-nightly.timer
+    content: |
+      ${indent(6, nightly_timer)}
+
+runcmd:
+  - usermod -aG docker deploy
+  # uid 10001 is the container user; the deploy group can drop Kadaster PDFs into the inbox.
+  - mkdir -p /srv/bidadvisor/data/bronze/kadaster/inbox
+  - chown -R 10001:deploy /srv/bidadvisor/data
+  - chmod -R 2770 /srv/bidadvisor/data
+  - chown deploy:deploy /srv/bidadvisor
+  - install -o deploy -g deploy -m 600 /dev/null /srv/bidadvisor/.env
+  - systemctl restart ssh
+  - systemctl enable --now docker
+  - systemctl daemon-reload
+  - systemctl enable --now bidadvisor-nightly.timer

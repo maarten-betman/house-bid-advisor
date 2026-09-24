@@ -1,0 +1,29 @@
+# HTTPS and the owner login in front of the API. Values come from /srv/bidadvisor/.env.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Liveness and CORS preflights carry no credentials; the API answers them itself.
+	@open {
+		path /api/health
+	}
+	@preflight {
+		method OPTIONS
+	}
+	handle @open {
+		reverse_proxy api:8000
+	}
+	handle @preflight {
+		reverse_proxy api:8000
+	}
+
+	handle /api/* {
+		basic_auth {
+			{$OWNER_USER} {$OWNER_PASSWORD_HASH}
+		}
+		reverse_proxy api:8000
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}

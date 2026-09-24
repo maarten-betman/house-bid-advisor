@@ -1,0 +1,4 @@
+deploy_public_key = "ssh-ed25519 AAAA... github-deploy"
+alert_email       = "you@example.com"
+# admin_public_key_path = "~/.ssh/id_ed25519.pub"
+# ssh_allowed_cidrs     = ["203.0.113.7/32"]  # tighter, if you deploy by hand
