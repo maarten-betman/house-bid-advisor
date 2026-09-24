@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+# Address-level data is personal data: never commit it.
+data/
+*.pdf
+*.parquet
