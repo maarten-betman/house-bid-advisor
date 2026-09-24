@@ -64,6 +64,12 @@ Guardrails, as in the spec's risk table:
 - Any error writes `bronze/funda/STOP.json`, alerts and exits 1. Later runs skip Funda until
   the marker is removed. A clean 404 (listing taken offline) is reported, not a stop.
 
+## Deploying
+
+A DigitalOcean Droplet runs the `nightly` command at 04:00 UTC: see
+[deploy/README.md](deploy/README.md). Locally the same image runs with
+`docker build -t bidadvisor . && docker run --rm -v "$PWD/data:/data" bidadvisor`.
+
 ## Checks
 
 ```bash

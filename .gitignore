@@ -7,3 +7,7 @@ __pycache__/
 data/
 *.pdf
 *.parquet
+# Terraform state holds infrastructure details; keep it out of git.
+deploy/terraform/.terraform/
+deploy/terraform/*.tfstate*
+deploy/terraform/terraform.tfvars

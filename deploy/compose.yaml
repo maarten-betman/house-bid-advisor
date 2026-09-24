@@ -1,0 +1,10 @@
+# Lives at /srv/bidadvisor/compose.yaml on the Droplet; copied there by the Deploy workflow.
+name: bidadvisor
+
+services:
+  job:
+    image: ghcr.io/maarten-betman/house-bid-advisor:latest
+    env_file: .env
+    volumes:
+      - /srv/bidadvisor/data:/data
+    profiles: ["job"]  # only started by `docker compose run`, never by `up`

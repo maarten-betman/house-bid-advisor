@@ -1,0 +1,10 @@
+[Unit]
+Description=house-bid-advisor nightly run (Funda watchlist, Kadaster ingest)
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/bidadvisor
+ExecStart=/usr/bin/docker compose run --rm job nightly
+TimeoutStartSec=2h

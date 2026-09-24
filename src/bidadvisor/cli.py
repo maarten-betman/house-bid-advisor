@@ -14,16 +14,19 @@ from bidadvisor.kadaster.parse import filter_scope, parse_pdf
 from bidadvisor.listings.nightly import STOP_MARKER, run_funda_step, stop_marker
 from bidadvisor.listings.watchlist import Watchlist
 from bidadvisor.model.backtest import rolling_backtest, summarise
+from bidadvisor.ops import Ops
 from bidadvisor.storage.lake import Lake
 from bidadvisor.transform.transactions import build_transactions
 
 MIN_MATCH_RATE = 0.98
+NO_NEW_PDFS = -1
 BAG_ATTRIBUTES = ["bag_vbo_id", "gebruiksoppervlakte_m2", "bouwjaar", "lat", "lon"]
 
 
 def kadaster_ingest(args: argparse.Namespace) -> int:
     lake = Lake(args.lake)
-    inbox = Path(args.inbox)
+    inbox = Path(args.inbox) if args.inbox else lake.path("bronze", "kadaster/inbox")
+    inbox.mkdir(parents=True, exist_ok=True)
     processed = inbox.parent / "processed"
     processed.mkdir(exist_ok=True)
     frames, unparsed = [], 0
@@ -36,7 +39,7 @@ def kadaster_ingest(args: argparse.Namespace) -> int:
         shutil.move(pdf, processed / pdf.name)
     if not frames:
         print("No new PDFs")
-        return 0
+        return NO_NEW_PDFS
     try:
         existing = lake.read_table("bronze", "kadaster_rows")
     except FileNotFoundError:
@@ -136,6 +139,42 @@ def funda_run(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def nightly(args: argparse.Namespace) -> int:
+    """The scheduled run: Funda, then new Kadaster PDFs. Every step runs; any failure alerts."""
+    ops = Ops.from_env()
+    ops.ping("start")
+    failed: list[str] = []
+
+    def step(name: str, run) -> int:
+        try:
+            code = run()
+        except Exception as exc:  # one broken step must not hide the others
+            ops.alert(f"nightly step {name} crashed: {type(exc).__name__}: {exc}")
+            code = 1
+        if code > 0:
+            failed.append(name)
+        return code
+
+    def funda() -> int:
+        from bidadvisor.listings.source import PyFundaSource
+
+        return run_funda_step(
+            Lake(args.lake), PyFundaSource, lookup=pdok_lookup(), alert=ops.alert
+        ).exit_code
+
+    step("funda", funda)
+    ingest_args = argparse.Namespace(lake=args.lake, inbox=None)
+    if step("kadaster-ingest", lambda: kadaster_ingest(ingest_args)) != NO_NEW_PDFS:
+        step("bag-match", lambda: bag_match(argparse.Namespace(lake=args.lake)))
+
+    if failed:
+        ops.alert(f"nightly run failed steps: {', '.join(failed)}")
+        ops.ping("fail", ", ".join(failed))
+        return 1
+    ops.ping("success")
+    return 0
+
+
 def funda_resume(args: argparse.Namespace) -> int:
     lake = Lake(args.lake)
     marker = stop_marker(lake)
@@ -153,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(required=True)
 
     ingest = commands.add_parser("kadaster-ingest", help="Parse PDFs from an inbox folder")
-    ingest.add_argument("--inbox", default="data/bronze/kadaster/inbox")
+    ingest.add_argument("--inbox", help="Default: <lake>/bronze/kadaster/inbox")
     ingest.set_defaults(run=kadaster_ingest)
 
     match = commands.add_parser("bag-match", help="Resolve Kadaster rows to BAG IDs via PDOK")
@@ -187,11 +226,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.set_defaults(run=funda_run)
 
+    commands.add_parser("nightly", help="Scheduled run: Funda, then Kadaster").set_defaults(
+        run=nightly
+    )
+
     resume = commands.add_parser("funda-resume", help="Show and remove the Funda stop marker")
     resume.set_defaults(run=funda_resume)
 
     args = parser.parse_args(argv)
-    return args.run(args)
+    return max(args.run(args), 0)
 
 
 if __name__ == "__main__":
