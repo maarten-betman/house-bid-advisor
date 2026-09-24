@@ -9,6 +9,7 @@ Implemented so far:
 
 - **M1 — Kadaster baseline**: what houses in the search area actually sell for, without Funda.
 - **M2 — Funda watchlist**: daily snapshots of the listings you choose, with a stop marker.
+- **M3 — Scoring and API**: ask-anchored estimate, combiner, serving JSON, authenticated API.
 
 ## Layout
 
@@ -24,6 +25,12 @@ Implemented so far:
 | `src/bidadvisor/listings/watchlist.py` | `serving/watchlist.json`, at most 50 active listings |
 | `src/bidadvisor/listings/nightly.py` | Nightly Funda step: paced fetches, stop marker, persistence |
 | `src/bidadvisor/transform/listings.py` | Silver `listing` and SCD2 `listing_version` |
+| `src/bidadvisor/transform/matching.py` | Listing episodes (relists) matched to their Kadaster sale |
+| `src/bidadvisor/model/ask.py` | Ask-anchored estimate: NVM prior gap, empirical Bayes, adjusters |
+| `src/bidadvisor/model/combine.py` | Inverse-variance combination; stacker + conformal from 30 matches |
+| `src/bidadvisor/pipeline/train.py` | Train hedonic (+ backtest), ask model and combiner |
+| `src/bidadvisor/pipeline/score.py` | Score the watchlist → `serving/scores/{key}.json` |
+| `src/bidadvisor/api.py` | FastAPI: scores and watchlist |
 | `src/bidadvisor/storage/lake.py` | bronze / silver / gold / serving on a local folder |
 
 ## Running M1
@@ -64,9 +71,39 @@ Guardrails, as in the spec's risk table:
 - Any error writes `bronze/funda/STOP.json`, alerts and exits 1. Later runs skip Funda until
   the marker is removed. A clean 404 (listing taken offline) is reported, not a stop.
 
+## Running M3 (scoring and API)
+
+Reference data in the lake:
+
+- `bronze/reference/cbs_index.csv`: `region, month (YYYY-MM), value[, published_on]`
+- `bronze/reference/bag_attributes.parquet`: `bag_vbo_id, gebruiksoppervlakte_m2, bouwjaar,
+  lat, lon` (optional `woningtype`, `energielabel`)
+
+```bash
+uv run bidadvisor build                        # silver transactions from matched Kadaster rows
+INDEX_REGION=<region> uv run bidadvisor train  # hedonic model + 24-month backtest
+uv run bidadvisor score                        # one JSON per watchlisted listing
+uv run bidadvisor serve                        # API on :8000 (no auth: put Caddy in front)
+```
+
+A listing is scored even before any Kadaster model exists, from its asking price and
+the NVM priors; the payload's `warnings` say which parts are missing.
+
+| Method | Path | Does |
+| --- | --- | --- |
+| GET | `/api/scores/{key}` | Latest score; `key` = `bag_vbo_id`, or `funda-<id>` before a BAG match |
+| GET | `/api/watchlist` | Watched listings with status, score key and last score time |
+| POST | `/api/watchlist` | `{"url": "<funda link>"}` → 202; fetched on the next nightly run |
+| DELETE | `/api/watchlist/{funda_id}` | Stops tracking a listing |
+| GET | `/api/health` | Liveness, no login |
+
+Score payload: `final_price` (q05…q95, the distribution the Bieden tab's win curve
+interpolates), `hedonic`, `ask.gap_mean`, `weights`, `taxatie` (k-nearest P10/P50/P90),
+`listing` (asking price, status, days on market, price cuts), `model_version`, `warnings`.
+
 ## Deploying
 
-A DigitalOcean Droplet runs the `nightly` command at 04:00 UTC: see
+A DigitalOcean Droplet runs the `nightly` command at 04:00 UTC and the API behind Caddy: see
 [deploy/README.md](deploy/README.md). Locally the same image runs with
 `docker build -t bidadvisor . && docker run --rm -v "$PWD/data:/data" bidadvisor`.
 

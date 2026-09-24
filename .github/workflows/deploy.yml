@@ -63,13 +63,14 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-      - name: Copy compose file
-        run: scp deploy/compose.yaml "deploy@$HOST:/srv/bidadvisor/compose.yaml"
-      - name: Pull the new image
+      - name: Copy compose file and Caddyfile
+        run: scp deploy/compose.yaml deploy/Caddyfile "deploy@$HOST:/srv/bidadvisor/"
+      - name: Pull the new image and restart the API
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           printf '%s' "$TOKEN" | ssh "deploy@$HOST" \
             "docker login ghcr.io -u ${{ github.actor }} --password-stdin \
              && cd /srv/bidadvisor && docker compose --profile job pull \
+             && docker compose up -d --remove-orphans \
              ; status=\$?; docker logout ghcr.io; docker image prune -f; exit \$status"

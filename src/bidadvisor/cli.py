@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -15,11 +17,22 @@ from bidadvisor.listings.nightly import STOP_MARKER, run_funda_step, stop_marker
 from bidadvisor.listings.watchlist import Watchlist
 from bidadvisor.model.backtest import rolling_backtest, summarise
 from bidadvisor.ops import Ops
+from bidadvisor.pipeline.score import score_watchlist
+from bidadvisor.pipeline.train import (
+    BAG_ATTRIBUTES as BAG_ATTRIBUTES_FILE,
+)
+from bidadvisor.pipeline.train import (
+    INDEX_CSV,
+    load_model,
+    train_feedback,
+    train_hedonic,
+)
 from bidadvisor.storage.lake import Lake
 from bidadvisor.transform.transactions import build_transactions
 
 MIN_MATCH_RATE = 0.98
 NO_NEW_PDFS = -1
+TRAIN_WEEKDAY = 6  # Sunday
 BAG_ATTRIBUTES = ["bag_vbo_id", "gebruiksoppervlakte_m2", "bouwjaar", "lat", "lon"]
 
 
@@ -66,7 +79,7 @@ def bag_match(args: argparse.Namespace) -> int:
 def build(args: argparse.Namespace) -> int:
     lake = Lake(args.lake)
     matched = lake.read_table("silver", "kadaster_matched")
-    attributes = pd.read_parquet(args.bag_attributes)
+    attributes = pd.read_parquet(args.bag_attributes or lake.path("bronze", BAG_ATTRIBUTES_FILE))
     missing = set(BAG_ATTRIBUTES) - set(attributes.columns)
     if missing:
         raise SystemExit(f"BAG attributes file lacks columns: {sorted(missing)}")
@@ -140,7 +153,10 @@ def funda_run(args: argparse.Namespace) -> int:
 
 
 def nightly(args: argparse.Namespace) -> int:
-    """The scheduled run: Funda, then new Kadaster PDFs. Every step runs; any failure alerts."""
+    """The scheduled run, in the spec's order: Funda, Kadaster, transform, train, score.
+
+    Every step runs even when an earlier one failed; any failure alerts and exits 1.
+    """
     ops = Ops.from_env()
     ops.ping("start")
     failed: list[str] = []
@@ -162,16 +178,54 @@ def nightly(args: argparse.Namespace) -> int:
             Lake(args.lake), PyFundaSource, lookup=pdok_lookup(), alert=ops.alert
         ).exit_code
 
+    lake = Lake(args.lake)
     step("funda", funda)
     ingest_args = argparse.Namespace(lake=args.lake, inbox=None)
-    if step("kadaster-ingest", lambda: kadaster_ingest(ingest_args)) != NO_NEW_PDFS:
+    new_kadaster = step("kadaster-ingest", lambda: kadaster_ingest(ingest_args)) != NO_NEW_PDFS
+    if new_kadaster:
         step("bag-match", lambda: bag_match(argparse.Namespace(lake=args.lake)))
+        if lake.exists("bronze", BAG_ATTRIBUTES_FILE):
+            step("build", lambda: build(argparse.Namespace(lake=args.lake, bag_attributes=None)))
+
+    ready = lake.exists("silver", "transaction.parquet") and lake.exists("bronze", INDEX_CSV)
+    due = new_kadaster or date.today().weekday() == TRAIN_WEEKDAY
+    if ready and (due or load_model(lake, "hedonic") is None):
+        step("train", lambda: train(argparse.Namespace(lake=args.lake, region=None, model=None)))
+    step("train-feedback", lambda: (train_feedback(lake), 0)[1])
+    step("score", lambda: score(argparse.Namespace(lake=args.lake)))
 
     if failed:
         ops.alert(f"nightly run failed steps: {', '.join(failed)}")
         ops.ping("fail", ", ".join(failed))
         return 1
     ops.ping("success")
+    return 0
+
+
+def train(args: argparse.Namespace) -> int:
+    region = args.region or os.environ.get("INDEX_REGION")
+    if not region:
+        raise SystemExit("Set --region or INDEX_REGION (the index CSV's region value)")
+    kind = args.model or os.environ.get("HEDONIC_MODEL", "ridge")
+    meta = train_hedonic(Lake(args.lake), region, pd.Timestamp(date.today()), kind=kind)
+    print(meta)
+    backtest_passed = (meta["backtest"] or {}).get("passed", True)
+    return 0 if meta["trusted"] and backtest_passed is not False else 1
+
+
+def score(args: argparse.Namespace) -> int:
+    payloads = score_watchlist(Lake(args.lake))
+    unscored = [p["funda_id"] for p in payloads if p["final_price"] is None]
+    print(f"{len(payloads)} listings scored, {len(unscored)} without a price estimate")
+    return 1 if unscored else 0
+
+
+def serve(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    from bidadvisor.api import create_app
+
+    uvicorn.run(create_app(args.lake), host=args.host, port=args.port, proxy_headers=True)
     return 0
 
 
@@ -199,7 +253,10 @@ def main(argv: list[str] | None = None) -> int:
     match.set_defaults(run=bag_match)
 
     build_cmd = commands.add_parser("build", help="Join BAG attributes, build transactions")
-    build_cmd.add_argument("--bag-attributes", required=True, help=f"Parquet with {BAG_ATTRIBUTES}")
+    build_cmd.add_argument(
+        "--bag-attributes",
+        help=f"Parquet with {BAG_ATTRIBUTES}; default <lake>/bronze/{BAG_ATTRIBUTES_FILE}",
+    )
     build_cmd.set_defaults(run=build)
 
     bt = commands.add_parser("backtest", help="Rolling monthly backtest of the hedonic model")
@@ -229,6 +286,20 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("nightly", help="Scheduled run: Funda, then Kadaster").set_defaults(
         run=nightly
     )
+
+    tr = commands.add_parser("train", help="Fit the hedonic model and run the backtest")
+    tr.add_argument("--region", help="Index region (default: INDEX_REGION)")
+    tr.add_argument(
+        "--model", choices=["ridge", "lightgbm"], help="Default: HEDONIC_MODEL or ridge"
+    )
+    tr.set_defaults(run=train)
+
+    commands.add_parser("score", help="Score every watchlisted listing").set_defaults(run=score)
+
+    sv = commands.add_parser("serve", help="Run the HTTP API")
+    sv.add_argument("--host", default="0.0.0.0")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.set_defaults(run=serve)
 
     resume = commands.add_parser("funda-resume", help="Show and remove the Funda stop marker")
     resume.set_defaults(run=funda_resume)

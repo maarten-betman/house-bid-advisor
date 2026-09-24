@@ -33,9 +33,12 @@ class Lake:
         return pd.read_parquet(self.path(layer, f"{name}.parquet"))
 
     def write_json(self, layer: str, name: str, payload: dict) -> Path:
+        """Atomic: readers (the API, the nightly job) never see a half-written file."""
         target = self.path(layer, name)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(payload, indent=2, default=str))
+        tmp = target.with_name(f".{target.name}.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, default=str))
+        tmp.replace(target)
         return target
 
     def read_json(self, layer: str, name: str) -> dict:

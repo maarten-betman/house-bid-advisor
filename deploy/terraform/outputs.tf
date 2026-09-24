@@ -3,6 +3,11 @@ output "ip" {
   value       = digitalocean_reserved_ip.app.ip_address
 }
 
+output "sslip_domain" {
+  description = "A hostname that resolves to the reserved IP, for DOMAIN in .env if you have no domain of your own."
+  value       = "${replace(digitalocean_reserved_ip.app.ip_address, ".", "-")}.sslip.io"
+}
+
 output "ssh" {
   value = "ssh deploy@${digitalocean_reserved_ip.app.ip_address}"
 }

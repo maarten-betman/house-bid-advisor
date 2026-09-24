@@ -1,7 +1,8 @@
 # Deploying to DigitalOcean
 
-One small Droplet in Amsterdam runs the nightly job in Docker on a systemd timer.
-Terraform creates the infrastructure; GitHub Actions builds the image and ships it.
+One small Droplet in Amsterdam runs the nightly job in Docker on a systemd timer, and the
+API behind Caddy (HTTPS and the owner login). Terraform creates the infrastructure;
+GitHub Actions builds the image and ships it.
 Cost is about $7.20 a month: a $6 Droplet plus $1.20 for weekly backups.
 
 | Spec (Azure) | Here (DigitalOcean) |
@@ -9,6 +10,8 @@ Cost is about $7.20 a month: a $6 Droplet plus $1.20 for weekly backups.
 | Container Apps Job, cron `0 4 * * *` | `bidadvisor-nightly.timer` → `docker compose run --rm job nightly` |
 | ADLS Gen2 containers | `/srv/bidadvisor/data` on the Droplet disk, weekly Droplet backups |
 | Azure Monitor alert on failed runs | Dead-man's switch (`HEALTHCHECK_URL`) + alert webhook (`ALERT_WEBHOOK_URL`) |
+| SWA auth, owner role | Caddy `basic_auth` on `/api/*`; one owner account |
+| Function `/api` | `bidadvisor serve` (FastAPI) in the `api` container |
 | Container Apps secrets | `/srv/bidadvisor/.env`, mode 600, never in git or Terraform state |
 | Bicep | `deploy/terraform/` |
 | GHCR | GHCR (private package, pulled with the workflow's own token) |
@@ -37,15 +40,25 @@ Cost is about $7.20 a month: a $6 Droplet plus $1.20 for weekly backups.
 5. **Alerts.** Create a check on [healthchecks.io](https://healthchecks.io) with cron
    `0 4 * * *`, time zone UTC, grace 2 hours, and connect it to your email or phone. For
    instant alerts, pick an [ntfy.sh](https://ntfy.sh) topic with a long random name.
-   Then put both on the Droplet:
+6. **Owner login.** Hash a password (it never leaves your machine in clear text):
+   ```bash
+   docker run --rm caddy:2.10 caddy hash-password --plaintext '<your password>'
+   ```
+7. **Settings on the Droplet.** Keep the single quotes around the hash: it contains `$`.
    ```bash
    ssh deploy@<ip>
    cat > /srv/bidadvisor/.env <<'ENV'
+   DOMAIN=<terraform output -raw sslip_domain, or your own domain pointing at the IP>
+   OWNER_USER=owner
+   OWNER_PASSWORD_HASH='$2a$14$...'
    HEALTHCHECK_URL=https://hc-ping.com/<uuid>
    ALERT_WEBHOOK_URL=https://ntfy.sh/<long-random-topic>
+   INDEX_REGION=<region value used in cbs_index.csv>
+   HEDONIC_MODEL=ridge
+   CORS_ORIGINS=https://hypotheekscenarios.nl
    ENV
    ```
-6. **First deploy:** merge to `main`, or run the Deploy workflow by hand (Actions → Deploy →
+8. **First deploy:** merge to `main`, or run the Deploy workflow by hand (Actions → Deploy →
    Run workflow).
 
 ## Day to day
@@ -62,11 +75,17 @@ systemctl list-timers bidadvisor-nightly.timer              # next run
 journalctl -u bidadvisor-nightly.service -n 100             # last run's output
 ```
 
-Kadaster PDFs go into the inbox; the next nightly run parses and BAG-matches them:
+Kadaster PDFs go into the inbox; the next nightly run parses and BAG-matches them. The
+price index and BAG attributes go under `reference/` (formats in the main README); with
+both present the nightly run builds transactions, trains on Sundays or when new PDFs
+arrive, and scores every night:
 
 ```bash
 scp Koopsominformatie_*.pdf deploy@<ip>:/srv/bidadvisor/data/bronze/kadaster/inbox/
+scp cbs_index.csv bag_attributes.parquet deploy@<ip>:/srv/bidadvisor/data/bronze/reference/
 ```
+
+The API is at `https://<DOMAIN>/api/...`: see the main README for the endpoints.
 
 ## M2 acceptance checks
 
@@ -77,6 +96,14 @@ scp Koopsominformatie_*.pdf deploy@<ip>:/srv/bidadvisor/data/bronze/kadaster/inb
   ```
 - **14 consecutive nightly runs:** the healthchecks.io log shows each ping; no `/fail` and
   no missed check for 14 days.
+
+## M3 acceptance checks
+
+- **Every watchlisted listing scored daily:** `ls /srv/bidadvisor/data/serving/scores/`
+  shows one file per listing with today's `scored_at`; the nightly run exits 1 (and
+  alerts) when a listing gets no price estimate.
+- **Unauthenticated calls refused:** `curl -i https://<DOMAIN>/api/watchlist` returns
+  `401` with a login prompt; `curl -u owner:<password> ...` returns `200`.
 
 ## When the search ends
 
